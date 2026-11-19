@@ -1,18 +1,21 @@
 
 import os
 import re
+import json
 import tempfile
+import threading
+from flask import Flask, request
 import telebot
 import yt_dlp
 
-TOKEN = os.getenv("BOT_TOKEN")
-
-if not TOKEN:
-    raise RuntimeError("BOT_TOKEN is missing!")
+TOKEN = os.environ["BOT_TOKEN"]
+PUBLIC_URL = os.environ["PUBLIC_URL"].rstrip("/")
+WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
 
 bot = telebot.TeleBot(TOKEN)
+app = Flask(__name__)
 
-MAX_SIZE = 49 * 1024 * 1024
+MAX_SIZE = 45 * 1024 * 1024
 
 PLATFORMS = {
     "tiktok.com": "TikTok",
@@ -35,31 +38,24 @@ def detect_platform(url):
 
 @bot.message_handler(commands=["start"])
 def start(message):
-    name = message.from_user.first_name or "there"
-
     bot.reply_to(
         message,
-        f"📥 Welcome to YESITH SOCIAL MEDIA DOWNLOADER!\n\n"
-        f"Hello {name}! 👋\n\n"
-        f"Supported platforms:\n"
-        f"• TikTok\n• Instagram\n• Facebook\n"
-        f"• YouTube\n• X (Twitter)\n\n"
-        f"Send a public video link to get started!"
+        "📥 Welcome to YESITH SOCIAL MEDIA DOWNLOADER!\n\n"
+        "Send a public video link from:\n"
+        "TikTok, Instagram, Facebook, YouTube or X.\n\n"
+        "Only download videos you are authorized to save."
     )
 
 
 @bot.message_handler(func=lambda m: bool(m.text))
 def download_video(message):
-    url_match = re.search(
-        r'https?://[^\s]+',
-        message.text
-    )
+    match = re.search(r'https?://[^\s]+', message.text)
 
-    if not url_match:
-        bot.reply_to(message, "❌ Please send a valid video link.")
+    if not match:
+        bot.reply_to(message, "❌ Please send a video link.")
         return
 
-    url = url_match.group(0).rstrip(".,!?)")
+    url = match.group(0).rstrip(".,!?)")
     platform = detect_platform(url)
 
     if not platform:
@@ -68,13 +64,11 @@ def download_video(message):
 
     status = bot.reply_to(
         message,
-        f"✅ {platform} link detected!\n\n"
-        "⏳ Processing video..."
+        f"✅ {platform} link detected!\n⏳ Processing..."
     )
 
     try:
         with tempfile.TemporaryDirectory() as folder:
-
             options = {
                 "format": "best[ext=mp4]/best",
                 "outtmpl": os.path.join(folder, "video.%(ext)s"),
@@ -82,7 +76,7 @@ def download_video(message):
                 "max_filesize": MAX_SIZE,
                 "quiet": True,
                 "no_warnings": True,
-                "socket_timeout": 30,
+                "socket_timeout": 30
             }
 
             with yt_dlp.YoutubeDL(options) as ydl:
@@ -90,16 +84,16 @@ def download_video(message):
                 filename = ydl.prepare_filename(info)
 
             if not os.path.isfile(filename):
-                raise Exception("Video file not found.")
+                raise Exception("Video file not found")
 
             if os.path.getsize(filename) > MAX_SIZE:
-                raise Exception("Video is too large for Telegram.")
+                raise Exception("Video is too large")
 
             with open(filename, "rb") as video:
                 bot.send_video(
                     message.chat.id,
                     video,
-                    caption="✅ Downloaded by YESITH SOCIAL MEDIA DOWNLOADER"
+                    caption="✅ YESITH SOCIAL MEDIA DOWNLOADER"
                 )
 
         bot.delete_message(
@@ -107,22 +101,51 @@ def download_video(message):
             status.message_id
         )
 
-    except Exception as error:
+    except Exception:
         bot.edit_message_text(
             "❌ Download failed.\n\n"
-            "This video may be private, restricted, "
-            "unsupported or too large.\n\n"
-            "Please try another publicly accessible "
-            "video that you are authorized to download.",
+            "Video may be private, restricted, "
+            "unsupported or too large.",
             message.chat.id,
             status.message_id
         )
 
 
-print("YESITH SOCIAL MEDIA DOWNLOADER is running!")
+@app.route("/", methods=["GET"])
+def home():
+    return "YESITH SOCIAL MEDIA DOWNLOADER is running!"
 
-bot.infinity_polling(
-    skip_pending=True,
-    timeout=30,
-    long_polling_timeout=30
-)
+
+@app.route("/telegram", methods=["POST"])
+def telegram_webhook():
+    if request.headers.get(
+        "X-Telegram-Bot-Api-Secret-Token"
+    ) != WEBHOOK_SECRET:
+        return "Unauthorized", 401
+
+    data = request.get_json(silent=True)
+
+    if data:
+        update = telebot.types.Update.de_json(
+            json.dumps(data)
+        )
+
+        threading.Thread(
+            target=bot.process_new_updates,
+            args=([update],),
+            daemon=True
+        ).start()
+
+    return "OK", 200
+
+
+def setup_webhook():
+    bot.set_webhook(
+        url=PUBLIC_URL + "/telegram",
+        secret_token=WEBHOOK_SECRET
+    )
+
+
+setup_webhook()
+
+print("YESITH SOCIAL MEDIA DOWNLOADER is running!")
